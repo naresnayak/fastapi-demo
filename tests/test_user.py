@@ -1,46 +1,39 @@
 import pytest
 from httpx import AsyncClient, ASGITransport
 from unittest.mock import AsyncMock, MagicMock
+from app.main import app
+from app.routes import get_users_collection
 
 @pytest.fixture
-def app():
-    # Force a fresh import of the app inside the fixture
-    from app.main import app as fastapi_app
-    return fastapi_app
-
-@pytest.fixture
-async def client(app):
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        yield ac
-
-@pytest.mark.asyncio
-async def test_create_user_unit(client, monkeypatch):
-    # 1. Setup the Mock Result
+async def client():
+    # 1. Setup Mock
     mock_result = MagicMock()
     mock_result.inserted_id = "mocked_id_123"
     
-    # 2. Create the AsyncMock
-    # We use return_value because insert_one is awaited
-    mock_insert = AsyncMock(return_value=mock_result)
+    mock_collection = AsyncMock()
+    mock_collection.insert_one.return_value = mock_result
+    
+    # 2. Apply Dependency Override
+    # This tells FastAPI: "When someone asks for get_users_collection, give them my mock"
+    app.dependency_overrides[get_users_collection] = lambda: mock_collection
 
-    # 3. THE CRITICAL PATCH
-    # You must point this to the file where 'db' is USED.
-    # If your file is app/routes.py, use "app.routes.db.users.insert_one"
-    # If your file is app/main.py, use "app.main.db.users.insert_one"
-    monkeypatch.setattr("app.routes.db.users.insert_one", mock_insert)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        yield ac
+    
+    # 3. Cleanup: Remove the override so it doesn't leak into other tests
+    app.dependency_overrides.clear()
 
+@pytest.mark.asyncio
+async def test_create_user_unit(client):
     payload = {
-        "username": "TestUser", 
-        "email": "test@example.com", 
-        "password": "password123"
+        "username": "Alice",
+        "email": "alice@example.com",
+        "password": "secret123"
     }
 
-    # 4. Execute
     response = await client.post("/users", json=payload)
 
-    # 5. Assertions
     assert response.status_code == 200
-    assert response.json()["username"] == "TestUser"
-    
-    # 6. Verify the mock was actually called (Proof it didn't hit the real DB)
-    # mock_insert.assert_called_once()
+    data = response.json()
+    assert data["id"] == "mocked_id_123"
+    assert data["username"] == "Alice"
